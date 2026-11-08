@@ -1,0 +1,20 @@
+## Interface: 30300
+## Title: |cff33ccffTMPZ-LootCodex|r
+## Notes: Search and filter every item on the server by slot, stats and level, and see where it comes from. /codex to open.
+## Author: andy
+## Version: 1.5.5
+## OptionalDeps: pfQuest-wotlk, pfQuest-epoch, pfQuest
+## SavedVariables: LootCodexDB, LootCodexLog
+
+SourcesData.lua
+SharedLog.lua
+Sources.lua
+Recorder.lua
+Sync.lua
+LootCodex.lua
+Minimap.lua
+UnitTips.lua
+Upgrades.lua
+Wishlist.lua
+Learn.lua
+Settings.lua

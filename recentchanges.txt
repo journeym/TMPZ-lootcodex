@@ -1,0 +1,7 @@
+*Fixed issue where addon would constantly upload data about mobs dropping nothing - No longer reports mobs that drop nothing
+
+*Fixed issue where addon would spam "No player named xxxx is playing" When the senders addon is trying to share.
+
+*Database now loads during initial loading up - Still stutters on /reload (This is due to loading 20k+ items)
+
+08/11/2026

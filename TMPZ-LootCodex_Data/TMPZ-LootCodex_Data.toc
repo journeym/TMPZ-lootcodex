@@ -1,0 +1,17 @@
+## Interface: 30300
+## Title: |cff33ccffTMPZ-LootCodex|r Data
+## Notes: Item database for TMPZ-LootCodex. Loaded automatically when its window opens.
+## Author: andy
+## Version: 1.0.0
+## LoadOnDemand: 1
+
+Header.lua
+Items01.lua
+Items02.lua
+Items03.lua
+Items04.lua
+Items05.lua
+Items06.lua
+Items07.lua
+Items08.lua
+Items09.lua
