@@ -74,7 +74,7 @@ local WEAPONS = {
     SHAMAN = "Daggers,Fist Weapons,One-Handed Axes,Two-Handed Axes,One-Handed Maces,Two-Handed Maces,Staves",
     MAGE = "Daggers,One-Handed Swords,Staves,Wands",
     WARLOCK = "Daggers,One-Handed Swords,Staves,Wands",
-    DRUID = "Daggers,Fist Weapons,One-Handed Maces,Two-Handed Maces,Staves",
+    DRUID = "Daggers,Fist Weapons,One-Handed Maces,Two-Handed Maces,Polearms,Staves",   -- Epoch druids get polearms
 }
 local ARMOR = {   -- best armor type now, and from level 40
     WARRIOR = { "Mail", "Plate" }, PALADIN = { "Mail", "Plate" }, HUNTER = { "Leather", "Mail" },

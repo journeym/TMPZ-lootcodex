@@ -93,10 +93,73 @@ local function Whisper(target, strings)
 end
 
 ------------------------------------------------------------------------
+-- new-version notice. Each client says which version it runs (R^1.5.5) to its guild (and group) once
+-- at login; anyone who hears a newer one gets one chat line per session (repeated at later logins
+-- until they update). Someone on an older version logging in is answered by one client (random short
+-- delay; whoever speaks first, the rest stay quiet), so they hear about it even if nobody newer
+-- logs in after them. Versions older than this feature never send or show it, and ignore R messages.
+------------------------------------------------------------------------
+-- where to get updates, shown in the notice; "" = "wherever you downloaded this one"
+LC.DOWNLOAD_URL = "https://project-epoch.org/forums/?topic=318&page=last#post-1131"
+
+local MY_VERSION = GetAddOnMetadata and GetAddOnMetadata("TMPZ-LootCodex", "Version") or "0"
+local noticed = false
+local versionReplyAt            -- GetTime() to answer an older client's R, or nil
+
+local function VersionParts(v)
+    local t = {}
+    for n in tostring(v or ""):gmatch("%d+") do t[#t + 1] = tonumber(n) end
+    return t
+end
+
+-- true when a is a later version than b
+local function Newer(a, b)
+    local x, y = VersionParts(a), VersionParts(b)
+    for i = 1, math.max(#x, #y) do
+        local p, q = x[i] or 0, y[i] or 0
+        if p ~= q then return p > q end
+    end
+    return false
+end
+
+-- one step up from ours at most (1.5.5 -> 1.x or 2.x), so a joke "R^99.0" can't nag the guild
+local function Plausible(v)
+    local x, y = VersionParts(v), VersionParts(MY_VERSION)
+    return x[1] ~= nil and y[1] ~= nil and x[1] <= y[1] + 1
+end
+
+local function Notice(v)
+    if noticed or not (LootCodexDB and LootCodexDB.versionNotice ~= false) then return end
+    noticed = true
+    local where = LC.DOWNLOAD_URL ~= "" and ("Download: " .. LC.DOWNLOAD_URL)
+        or "Get it from wherever you downloaded this one."
+    DEFAULT_CHAT_FRAME:AddMessage(string.format(
+        "|cff33ccffTMPZ-LootCodex:|r |cffffd100version %s is out|r (you have %s). %s", v, MY_VERSION, where))
+end
+
+local function HeardVersion(v, sender)
+    if not v or not Plausible(v) or (log and log.ignore[sender]) then return end
+    if Newer(v, MY_VERSION) then
+        if LootCodexDB and Newer(v, LootCodexDB.newestVersion or "0") then LootCodexDB.newestVersion = v end
+        Notice(v)
+    elseif Newer(MY_VERSION, v) then
+        versionReplyAt = versionReplyAt or (GetTime() + 3 + math.random() * 9)
+    else
+        versionReplyAt = nil        -- someone on our version (or newer) answered already
+    end
+end
+
+function LC.VersionInfo() return MY_VERSION, LootCodexDB and LootCodexDB.newestVersion end
+
+------------------------------------------------------------------------
 -- receiving
 ------------------------------------------------------------------------
 local function OnMessage(msg, channel, sender)
     local kind = msg:sub(1, 1)
+    if kind == "R" then
+        HeardVersion(msg:match("^R%^([%d%.]+)$"), sender)
+        return
+    end
     if kind == "S" then
         local proto, since = msg:match("^S%^(%d+)%^(%d+)")
         if tonumber(proto) ~= PROTO or channel ~= "GUILD" or GetTime() < busyUntil or pendingFor then return end
@@ -153,6 +216,18 @@ driver:SetScript("OnUpdate", function()
             Queue("GUILD", nil, "S^" .. PROTO .. "^" .. (log.lastSeen or 0))
             asked = true
         end
+        if Enabled() then
+            if IsInGuild() then Queue("GUILD", nil, "R^" .. MY_VERSION) end
+            local group = GroupChannel()
+            if group then Queue(group, nil, "R^" .. MY_VERSION) end
+        end
+        -- still behind a version heard at an earlier login: say so again
+        local newest = LootCodexDB and LootCodexDB.newestVersion
+        if newest and Newer(newest, MY_VERSION) then Notice(newest) end
+    end
+    if versionReplyAt and now >= versionReplyAt then
+        versionReplyAt = nil
+        if Enabled() and IsInGuild() then Queue("GUILD", nil, "R^" .. MY_VERSION, true) end
     end
     if pendingFor and now >= pendingAt then
         local who, since = pendingFor, pendingSince

@@ -126,14 +126,49 @@ local function Reindex()
     LC.ForgetSources()
 end
 
+-- GM-only places: loot there is GMs testing (spawning bosses to check their drops), not real data.
+-- Never recorded, never accepted from others, and cleared out of the saved log at load.
+local IGNORED_ZONES = { ["GM Island"] = true }
+
+-- What a shared record teaches that wasn't known, for the minimap badge's list of finds -- or nil.
+-- Every record still counts (kills, drop chances); only real news is listed:
+--   a kill: just the items nobody had recorded from that mob and pfQuest doesn't list for it, so the
+--           tenth "Defias Pillager dropped Linen Cloth" (and every kill with no items) stays quiet
+--   a vendor item pfQuest already lists for that vendor: quiet
+--   quest rewards and trainer recipes are keyed one per fact already, so a new one is always news
+local function NewFind(r)
+    if r.t == "E" then return nil end
+    if r.t == "K" then
+        local m = mobs[r.npc]
+        local pf = LC.UnitDropIndex and type(r.npc) == "number" and LC.UnitDropIndex()[r.npc]
+        local new = {}
+        for id in (r.items or ""):gmatch("%d+") do
+            local n = tonumber(id)
+            if not (m and m.items[n]) and not (pf and pf[n]) then new[#new + 1] = id end
+        end
+        if #new == 0 then return nil end
+        local copy = {}
+        for k, v in pairs(r) do copy[k] = v end
+        copy.items = table.concat(new, ",")
+        return copy
+    end
+    if r.t == "V" then
+        local d = pfDB and pfDB.items and pfDB.items.data and pfDB.items.data[r.item]
+        if type(d) == "table" and d.V and d.V[r.npc] then return nil end
+    end
+    return r
+end
+
 -- Adds a record unless it is already known. src = sender's name, nil when recorded here.
 function LC.AddRecord(key, r, src)
+    if r.zone and IGNORED_ZONES[r.zone] then return false end
     if log.rec[key] or shared[key] then return false end
     if src and log.ignore[src] then return false end
     r.rt, r.src = time(), src
     log.rec[key] = r
+    local find = src and LC.NoteShared and NewFind(r)     -- decided before Index adds it
     Index(r)
-    if src and LC.NoteShared then LC.NoteShared(r, src) end
+    if find then LC.NoteShared(find, src) end
     return true
 end
 
@@ -366,12 +401,42 @@ end
 -- pfQuest ranks Boss and drops a blue. Plain elites never count on their own, however good their loot:
 -- /codex boss adds (or removes) one by hand (LootCodexDB.bossMarks, npc -> true in / false out).
 -- Records from before 1.6 have no instance: their zone stands in.
+--
+-- BOSSES ships Reborn bosses confirmed by hand that none of the rules above can spot (a new boss the
+-- game calls a plain elite, unknown to pfQuest). They count as marked for everyone, show under their
+-- dungeon even before anyone has looted them, and /codex boss still takes one off a player's own list.
+local BOSSES = {
+    [50150] = { name = "Melisandre Scourgebane", inst = "Scarlet Monastery" },   -- 2026-11-08
+    [45124] = { name = "Magmaw", inst = "Molten Core" },                         -- 2026-11-08
+    [45134] = { name = "Moltara", inst = "Molten Core" },                        -- 2026-11-08, replaces Gehennas
+}
+LC.BUILTIN_BOSSES = BOSSES
+
+-- Bosses Reborn took out, by NPC id: left off the Dungeons tab even where pfQuest's classic data
+-- still has them.
+LC.REMOVED_BOSSES = {
+    [12259] = true,     -- Gehennas (Molten Core), replaced by Moltara
+}
+
 function LC.LearnedBosses()
     local out = {}
     local units = pfDB and pfDB.units and pfDB.units.data
-    local marks = LootCodexDB and LootCodexDB.bossMarks or {}
+    local marks = {}
+    for npc in pairs(BOSSES) do marks[npc] = true end
+    for npc, v in pairs(LootCodexDB and LootCodexDB.bossMarks or {}) do marks[npc] = v end
+    for npc, b in pairs(BOSSES) do
+        if not mobs[npc] and marks[npc] then
+            out[#out + 1] = { npc = npc, name = b.name, inst = b.inst, inInstance = true, marked = true,
+                kills = 0, items = {}, new = true }
+        end
+    end
+    -- where a boss is filed: the dungeon it was marked in with /codex boss, else the built-in list's,
+    -- else where it was looted. Kills recorded somewhere else (a GM spawning it on GM Island to test
+    -- its loot) then still count towards its drops without moving it out of its dungeon.
+    local homes = LootCodexDB and LootCodexDB.bossInst or {}
     for npc, m in pairs(mobs) do
-        local where = m.inst or m.zone
+        local home = homes[npc] or (BOSSES[npc] and BOSSES[npc].inst)
+        local where = home or m.inst or m.zone
         if type(npc) == "number" and where and where ~= "" and marks[npc] ~= false then
             local blue = false
             for id in pairs(m.items) do
@@ -389,7 +454,8 @@ function LC.LearnedBosses()
                 or (m.cls == "r" and (blue or (units and not u)))
                 or (blue and u and u.rnk == "3")
             if boss then
-                out[#out + 1] = { npc = npc, name = m.name, inst = where, inInstance = m.inst ~= nil, rare = m.cls == "r",
+                out[#out + 1] = { npc = npc, name = m.name, inst = where, inInstance = home ~= nil or m.inst ~= nil,
+                    rare = m.cls == "r",
                     marked = marks[npc],
                     kills = m.kills, items = m.items,
                     shared = m.shared, new = units ~= nil and not u }
@@ -407,8 +473,8 @@ function LC.ToggleBossMark(npc, name)
     for _, b in ipairs(LC.LearnedBosses()) do if b.npc == npc then listed = true end end
     LootCodexDB.bossMarks[npc] = not listed
     if LC.ForgetLearnedBosses then LC.ForgetLearnedBosses() end
-    local m = mobs[npc]
-    return not listed, m and m.name or name, m and (m.inst or m.zone)
+    local m, b = mobs[npc], BOSSES[npc]
+    return not listed, m and m.name or name, m and (m.inst or m.zone) or (b and b.inst)
 end
 
 LC.NpcId = NpcId
@@ -481,6 +547,9 @@ ev:SetScript("OnEvent", function(self, event, arg)
         log.rec = log.rec or {}
         log.ignore = log.ignore or {}
         shared = LootCodexShared and LootCodexShared.rec or {}
+        for key, r in pairs(log.rec) do
+            if r.zone and IGNORED_ZONES[r.zone] then log.rec[key] = nil end
+        end
         Reindex()
         self:RegisterEvent("LOOT_OPENED")
         self:RegisterEvent("MERCHANT_SHOW")

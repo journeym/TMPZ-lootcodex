@@ -399,6 +399,8 @@ local function Hook(tip)
         self.lootCodexDone = true
         if LC.LearnFromTooltip then LC.LearnFromTooltip(self, id, link) end
         if self == ItemRefTooltip and LC.NoteRecent then LC.NoteRecent(id) end
+        -- the master switch (Settings > Tooltips): learning and Recent above still run, nothing is shown
+        if LootCodexDB.itemTooltip == false then return end
         if LC.IsWished and LC.IsWished(id) then self:AddLine(LC.STAR .. " On your wishlist", 1, 0.82, 0) end
         local rec = LC.Item and LC.Item(id)
         if rec and LC.IsRebornItem(rec) then self:AddLine("Epoch Reborn addition", 1, 0.6, 0.2) end

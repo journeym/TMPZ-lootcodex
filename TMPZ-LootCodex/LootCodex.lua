@@ -102,7 +102,7 @@ local SOURCES = {
 local DEFAULTS = { tooltip = true, record = true, share = true, tab = "gear", prof = "Blacksmithing",
     unitTooltip = true, unitHideGrey = true, unitShift = false, unitLines = 6,
     mapPins = true, upgrades = true, upgradeSpec = "auto", questBest = true, wishAlerts = true,
-    wishMobAlerts = true, wishMobSound = true,
+    wishMobAlerts = true, wishMobSound = true, itemTooltip = true, versionNotice = true,
     trackRecent = true, learnItems = true, sharedNotify = true, autoUpdateCheck = false,
     loginMessage = true, activityMessages = true, autoDungeon = true }
 local function TabDefaults(key)
@@ -247,8 +247,9 @@ local function BuildIndexes()
             local u = pfDB.units.data[npc]
             if u and u.rnk == "3" then ranked[inst] = true end
         end
+        local removed = LC.REMOVED_BOSSES or {}
         for npc, inst in pairs(LootCodexSources.unitzone) do
-            if CLASSIC_EXTRA[inst] and not fromAtlas[inst] then
+            if CLASSIC_EXTRA[inst] and not fromAtlas[inst] and not removed[npc] then
                 -- a boss is what pfQuest ranks Boss; in a dungeon where it ranks none (Dire Maul), a mob that
                 -- drops blue-or-better gear at 5% or more, or from a shared boss loot table (chance 0)
                 local u = pfDB.units.data[npc]
@@ -1657,7 +1658,8 @@ SlashCmdList.LOOTCODEX = function(msg)
         Print("/codex settings  all the options below, with tick boxes")
         Print("/codex status  which helper addons were found, and what has been learned")
         Print("/codex update  check the server for new and changed items (again to stop)")
-        Print("/codex tooltip  sources in tooltips on/off   /codex record  learning on/off")
+        Print("/codex tooltip  sources in tooltips on/off   /codex itemtips  all item tooltip lines on/off")
+        Print("/codex record  learning on/off")
         Print("/codex share  sharing with guild/group on/off   /codex minimap  minimap button on/off")
         Print("/codex forget  drop everything others shared   /codex ignore <name>  drop and block one player")
         Print("/codex boss  add your target to its dungeon's boss list, or take it off again")
@@ -1698,6 +1700,11 @@ SlashCmdList.LOOTCODEX = function(msg)
         Print("pfQuest: " .. yes(base) .. ",  pfQuest-epoch: " .. yes(IsAddOnLoaded("pfQuest-epoch"))
             .. (LC.HasPfQuest() and "" or "  (mob drops, vendors and map pins are off)"))
         Print("Item data: " .. (D and ("loaded, " .. #allIds .. " items") or "not loaded yet (opens with the window)"))
+        if LC.VersionInfo then
+            local mine, newest = LC.VersionInfo()
+            Print("Version " .. tostring(mine) .. (newest and newest ~= mine and ("  (newest seen in your guild/group: "
+                .. newest .. ")") or ""))
+        end
         local c = LC.LearnedCounts()
         Print(string.format("Learned: %d mobs, %d vendor items, %d quest rewards, %d shared by %d players.",
             c.mobs, c.vendors, c.quests, c.received, c.senders))
@@ -1747,6 +1754,11 @@ SlashCmdList.LOOTCODEX = function(msg)
     if msg == "tooltip" then
         LootCodexDB.tooltip = not LootCodexDB.tooltip
         Print("sources in item tooltips " .. (LootCodexDB.tooltip and "on." or "off."))
+        return
+    end
+    if msg == "itemtips" then
+        LootCodexDB.itemTooltip = LootCodexDB.itemTooltip == false
+        Print("TMPZ-LootCodex lines in item tooltips " .. (LootCodexDB.itemTooltip and "on." or "off."))
         return
     end
     if msg ~= "" then

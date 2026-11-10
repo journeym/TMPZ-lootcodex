@@ -117,6 +117,8 @@ Check(main, "Show the minimap button", "Click it to open the window, right-click
     "minimapHide", { invert = true, onChange = function() if LC.UpdateMinimapButton then LC.UpdateMinimapButton() end end })
 Check(main, "Status message when logging in", "One chat line: ready, and whether pfQuest and pfQuest-epoch were found.",
     "loginMessage")
+Check(main, "Tell me when a newer version is out",
+    "One chat line when a guild or group member runs a newer TMPZ-LootCodex. Needs sharing on.", "versionNotice")
 Check(main, "Chat messages for background work",
     "Update checks and loading the item data. Guild/group sharing only shows here when the minimap badge is off.",
     "activityMessages")
@@ -130,7 +132,14 @@ Check(main, "Show TBC/WotLK leftovers and test items",
 local tips = Page("Tooltips", "TMPZ-LootCodex", "What TMPZ-LootCodex adds to item and creature tooltips.")
 
 Heading(tips, "Item tooltips")
-Check(tips, "Show where items come from", "Drops, crafting, quests, vendors and bosses under every item tooltip.", "tooltip")
+local itemBox = Check(tips, "Add TMPZ-LootCodex lines to item tooltips",
+    "Off: item tooltips look like the game's own (no wishlist star, Reborn tag, upgrade line or sources).",
+    "itemTooltip")
+local srcBox = Check(tips, "Show where items come from", "Drops, crafting, quests, vendors and bosses under every item tooltip.",
+    "tooltip", { indent = 24 })
+local function UpdateItemOptions() Enable(srcBox, itemBox:GetChecked() and true or false) end
+itemBox:HookScript("OnClick", UpdateItemOptions)
+tips.onShow[#tips.onShow + 1] = function() Enable(srcBox, LootCodexDB.itemTooltip and true or false) end
 
 Heading(tips, "Creature tooltips")
 local unitBox = Check(tips, "Show what creatures drop", "Hover a mob to see its loot, best chance first.", "unitTooltip")

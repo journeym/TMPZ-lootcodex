@@ -2,7 +2,7 @@
 ## Title: |cff33ccffTMPZ-LootCodex|r
 ## Notes: Search and filter every item on the server by slot, stats and level, and see where it comes from. /codex to open.
 ## Author: andy
-## Version: 1.5.5
+## Version: 1.5.6
 ## OptionalDeps: pfQuest-wotlk, pfQuest-epoch, pfQuest
 ## SavedVariables: LootCodexDB, LootCodexLog
 
