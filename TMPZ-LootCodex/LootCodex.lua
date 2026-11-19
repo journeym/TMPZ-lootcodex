@@ -35,7 +35,7 @@ local LAYOUT = {
     wish = { "search", "wishmap", "sort" },
     recent = { "search", "recentclear" },
     cons = { "search", "type", "quality", "source", "sort", "level" },
-    prof = { "professions", "view", "search", "sort" },
+    prof = { "professions", "view", "canlearn", "search", "sort" },
     quest = { "search", "quality", "source", "sort", "level" },
     other = { "search", "category", "type", "quality", "source", "sort", "level" },
 }
@@ -162,6 +162,12 @@ local function IndexOf(list, name)
     for i, v in ipairs(list) do if v == name then return i end end
 end
 
+-- AtlasLoot entries named after a wing or place instead of the boss whose loot they are: shown on the
+-- Dungeons tab under the boss's name, so kills of that boss (which carry its name) add to the entry.
+local BOSS_RENAMES = {
+    ["Scarlet Monestery"] = { ["Armory"] = "Herod" },   -- Ravager, Herod's Shoulder, Raging Berserker's Helm
+}
+
 local function BuildIndexes()
     local claimed = {}
     for _, t in ipairs(TABS) do
@@ -228,6 +234,7 @@ local function BuildIndexes()
                 if kind == 1 or kind == 2 then
                     local inst = kind == 2 and "World Bosses" or where
                     local boss = kind == 2 and where or (who ~= "" and who or "Various")
+                    boss = BOSS_RENAMES[inst] and BOSS_RENAMES[inst][boss] or boss
                     dungeons[inst] = dungeons[inst] or {}
                     dungeons[inst][boss] = dungeons[inst][boss] or {}
                     dungeons[inst][boss][item] = chance
@@ -388,6 +395,19 @@ local function DungeonNamed(name, list)
     for inst in pairs(list) do if Simple(inst) == s then return inst end end
 end
 
+-- in-game name -> the name Epoch's AtlasLoot lists that boss under, where they differ (found by
+-- auditing every dungeon kill in the guild's shared log, 2026-11-11). Learned drops for these mobs go
+-- to that entry. The Ring of Law fighters share AtlasLoot's one "Ring of Law" table.
+local BOSS_ALIASES = {
+    ["Watchman Doomgrip"] = "Doomgrip",
+    ["Grubbis"] = "Grubbis&Chomper", ["Chomper"] = "Grubbis&Chomper",
+    ["Stone Keeper"] = "Ancient Stone Keeper",
+    ["Black Guard Swordsmith"] = "Black Guard Swordsmith (Summon)",
+    ["Crimson Hammersmith"] = "Crimson Hammersmith (Summon)",
+    ["Anub'shiah"] = "Ring of Law", ["Eviscerator"] = "Ring of Law", ["Gorosh the Dervish"] = "Ring of Law",
+    ["Grizzle"] = "Ring of Law", ["Hedrum the Creeper"] = "Ring of Law", ["Ok'thor the Breaker"] = "Ring of Law",
+}
+
 -- the dungeon lists plus bosses learned from kills that no list has (Reborn's additions); rebuilt
 -- when a kill is recorded or shared. A learned boss whose blue drops are all listed already is a
 -- known boss under another name, and stays out.
@@ -419,16 +439,50 @@ local function Dungeons()
                 for k, v in pairs(known or {}) do copy[k] = v end
                 allDungeons[inst] = copy
             end
-            -- green or better only: potions, cloth and grey junk drop from every mob, and boss lists
-            -- leave them out (the creature tooltip still shows everything)
+            -- blue or better only (user, 2026-11-12): greens from kills are mostly random world drops,
+            -- like potions, cloth and junk; the creature tooltip still shows everything
             local items = {}
             for id, n in pairs(b.items) do
                 local r = D[id]
-                if r and r[QUALITY] >= 2 then items[id] = math.floor(n / b.kills * 1000 + 0.5) / 10 end
+                if r and r[QUALITY] >= 3 then items[id] = math.floor(n / b.kills * 1000 + 0.5) / 10 end
             end
             allDungeons[inst][b.name] = items
             learnedBoss[inst] = learnedBoss[inst] or {}
             learnedBoss[inst][b.name] = b
+        end
+    end
+
+    -- Bosses already on a list (AtlasLoot's, pfQuest's) also get what players actually looted from
+    -- them that the list doesn't have: Epoch adds new drops to old bosses (Dextren Ward's 60478,
+    -- 60481, 110310), and those only ever show up in kills. Blue or better only; the list's own chances
+    -- and items (greens included) are kept.
+    for npc, m in pairs(LC.LearnedMobs and LC.LearnedMobs() or {}) do
+        local inst = type(npc) == "number" and m.kills > 0 and DungeonNamed(m.inst, dungeons)
+        local list = inst and allDungeons[inst]
+        local name = list and (list[m.name] and m.name or (BOSS_ALIASES[m.name] and list[BOSS_ALIASES[m.name]]
+            and BOSS_ALIASES[m.name]))
+        local boss = name and list[name]
+        if boss and not (learnedBoss[inst] and learnedBoss[inst][m.name]) then
+            local extra
+            for id, n in pairs(m.items) do
+                local r = D[id]
+                if r and r[QUALITY] >= 3 and boss[id] == nil then
+                    extra = extra or {}
+                    extra[id] = math.floor(n / m.kills * 1000 + 0.5) / 10
+                end
+            end
+            if extra then
+                -- copy first: the built lists stay as they are
+                if list == dungeons[inst] then
+                    local copy = {}
+                    for k, v in pairs(list) do copy[k] = v end
+                    allDungeons[inst], list = copy, copy
+                end
+                local merged = {}
+                for id, c in pairs(boss) do merged[id] = c end
+                for id, c in pairs(extra) do merged[id] = c end
+                list[name] = merged
+            end
         end
     end
     return allDungeons
@@ -495,6 +549,41 @@ local function ProfSet()
     return out
 end
 
+-- this character's rank in each profession they have, by name ("Blacksmithing" = 150). The skill list
+-- only lists lines under expanded headers, so collapsed headers are opened for the read and closed again.
+local skillCache, skillCacheAt
+local function MySkills()
+    if skillCache and GetTime() - skillCacheAt < 2 then return skillCache end
+    local out, collapsed = {}, {}
+    local i = 1
+    while i <= GetNumSkillLines() do
+        local name, header, expanded = GetSkillLineInfo(i)
+        if header and not expanded then collapsed[name] = true; ExpandSkillHeader(i) end
+        i = i + 1
+    end
+    for j = 1, GetNumSkillLines() do
+        local name, header, _, rank = GetSkillLineInfo(j)
+        if name and not header then out[name] = tonumber(rank) end
+    end
+    for j = GetNumSkillLines(), 1, -1 do
+        local name, header = GetSkillLineInfo(j)
+        if header and collapsed[name] then CollapseSkillHeader(j) end
+    end
+    skillCache, skillCacheAt = out, GetTime()
+    return out
+end
+-- nil when this character doesn't have the profession
+local function MySkill(p) return p and MySkills()[p] end
+LC.MySkill = MySkill
+
+-- a skill level coloured against yours: green = you can learn it now, red = not yet
+local function SkillText(n, prefix)
+    local have = MySkill(LootCodexDB.prof)
+    local s = (prefix or "") .. n
+    if not have or n <= 0 then return s end
+    return (n <= have and "|cff40ff40" or "|cffff4040") .. s .. "|r"
+end
+
 ------------------------------------------------------------------------
 -- filtering
 ------------------------------------------------------------------------
@@ -509,6 +598,11 @@ local function Matches(id, r, words)
     if not listed and LootCodexDB.rebornOnly and not HasFlag(r, F_REBORN) then return false end
     if profSet then
         if not profSet[id] then return false end
+        -- "Only what I can learn": needs the profession, and a skill level at or under yours
+        if f.canLearn and (f.view or "crafted") ~= "materials" then
+            local have = MySkill(LootCodexDB.prof)
+            if not have or (profSet[id] or 0) > have then return false end
+        end
     elseif idSet then
         if not idSet[id] then return false end
     elseif tabClasses[tab.key] and not tabClasses[tab.key][r[CLASS]] then
@@ -891,11 +985,13 @@ local function Details(id, r)
             local c = craftInfo[p][id]
             local learn = c[2] > 0 and c[2] or (LC.TrainerReq and LC.TrainerReq(p, id))
             info = Reagents(reagentsOf[p][id])
-            right = (learn and ("|cffff8040" .. learn .. "|r  ") or "|cff888888trainer|r  ")
+            local have = MySkill(p)
+            local learnText = learn and (have and SkillText(learn) or ("|cffff8040" .. learn .. "|r"))
+            right = (learnText and (learnText .. "  ") or "|cff888888trainer|r  ")
                 .. "|cffffff00" .. (c[5] or "?") .. "|r  |cff808080" .. (c[6] or "?") .. "|r"
         elseif view == "recipes" then
             info = "Teaches " .. (r[NAME]:match(":%s*(.+)$") or r[NAME])
-            right = (profSet[id] or 0) > 0 and ("Skill " .. profSet[id]) or ""
+            right = (profSet[id] or 0) > 0 and SkillText(profSet[id], "Skill ") or ""
         else
             local n = profSet[id] or 0
             info = n > 0 and string.format("Used in %d %s recipe%s", n, p, n == 1 and "" or "s") or Kind(r)
@@ -1022,8 +1118,14 @@ UpdateList = function()
         if st then what = st.name else noun = #results == 1 and "set" or "sets" end
     end
     countText:SetText(string.format("%s  |cffaaaaaa%d %s|r", what, #results, noun))
-    if tab.key == "prof" and (filters.view or "crafted") == "crafted" then
-        helpText:SetText("Skill: |cffff8040learn|r  |cffffff00yellow|r  |cff808080grey|r   (|cff888888trainer|r: visit one to learn it)")
+    if tab.key == "prof" and filters.canLearn and (filters.view or "crafted") ~= "materials"
+        and not MySkill(LootCodexDB.prof) then
+        helpText:SetText("This character doesn't have " .. LootCodexDB.prof .. ": untick \"Only what I can learn\" to see it all")
+    elseif tab.key == "prof" and (filters.view or "crafted") == "crafted" then
+        local have = MySkill(LootCodexDB.prof)
+        helpText:SetText(have
+            and ("Learn at: |cff40ff40now|r / |cffff4040later|r (you: " .. have .. ")   |cffffff00yellow|r  |cff808080grey|r   |cff888888trainer|r: visit one")
+            or "Skill: |cffff8040learn|r  |cffffff00yellow|r  |cff808080grey|r   (|cff888888trainer|r: visit one to learn it)")
     else
         helpText:SetText("Click: pin   Right-click: wishlist, map   Shift-click: link")
     end
@@ -1082,13 +1184,13 @@ local function MakeRow(parent, i)
             local id = self.id
             local opts = { { "wish", LC.IsWished(id) and "Remove from wishlist" or (LC.STAR .. " Add to wishlist") } }
             if LC.CanShowOnMap() then
-                opts[#opts + 1] = { "map", "Show on map" }
-                opts[#opts + 1] = { "clear", "Clear map pins" }
+                opts[#opts + 1] = { "map", "Track on map" }
+                opts[#opts + 1] = { "clear", "Stop tracking everything" }
             end
             opts[#opts + 1] = { "link", "Link in chat" }
             ShowMenu(self, opts, function(v)
                 if v == "wish" then LC.ToggleWish(id)
-                elseif v == "map" then LC.ShowItemOnMap(id)
+                elseif v == "map" then LC.ShowItemOnMap(id, true)
                 elseif v == "clear" then LC.ClearMapPins()
                 elseif v == "link" and not ChatEdit_InsertLink(link) then ChatFrame_OpenChat(link) end
             end)
@@ -1162,6 +1264,7 @@ local function Check(parent, label, onClick)
     local t = cb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     t:SetPoint("LEFT", cb, "RIGHT", 1, 1)
     t:SetText(label)
+    cb.label = t
     cb:SetScript("OnClick", function(self) onClick(self:GetChecked() and true or false) end)
     return cb
 end
@@ -1215,6 +1318,13 @@ function LC.SyncControls()
     controls.reborn:SetChecked(LootCodexDB.rebornOnly)
     controls.hidden:SetChecked(LootCodexDB.showHidden)
     controls.usable:SetChecked(filters.usable)
+    controls.canLearn:SetChecked(filters.canLearn)
+    if tab and tab.key == "prof" then
+        local have = MySkill(LootCodexDB.prof)
+        controls.canLearn.label:SetText("Only what I can learn " ..
+            (have and ("|cff40ff40(" .. have .. ")|r") or "|cff888888(not learned)|r"))
+        if (filters.view or "crafted") == "materials" then controls.canLearn:Disable() else controls.canLearn:Enable() end
+    end
     controls.upgradesOnly:SetChecked(filters.upgradesOnly)
     if LootCodexDB.upgrades then controls.upgradesOnly:Show() else controls.upgradesOnly:Hide() end
     for _, a in ipairs({ controls.bossPrev, controls.bossNext }) do
@@ -1431,6 +1541,11 @@ local function Build()
         a:SetScript("OnLeave", function() GameTooltip:Hide() end)
         controls[dir < 0 and "bossPrev" or "bossNext"] = a
     end
+
+    -- Professions tab: only recipes this character's skill level lets them learn
+    local cblk = Block("canlearn", 24)
+    controls.canLearn = Check(cblk, "Only what I can learn", function(v) filters.canLearn = v or nil; Refresh() end)
+    controls.canLearn:SetPoint("TOPLEFT", -2, 0)
 
     local ublk = Block("usable", 44)
     controls.usable = Check(ublk, "Usable by my class", function(v) filters.usable = v or nil; Refresh() end)
@@ -1664,6 +1779,8 @@ SlashCmdList.LOOTCODEX = function(msg)
         Print("/codex forget  drop everything others shared   /codex ignore <name>  drop and block one player")
         Print("/codex boss  add your target to its dungeon's boss list, or take it off again")
         Print("/codex wishcheck  does your target drop anything on your wishlist?   /codex mobalerts  those alerts on/off")
+        Print("/codex alerts sound|text|chat|off  how wishlist alerts show: on screen + sound, on screen silently, chat only, or not at all")
+        Print("/codex tracker  show/hide the list of what you're tracking on the map")
         return
     end
     if msg == "boss" then
@@ -1682,6 +1799,12 @@ SlashCmdList.LOOTCODEX = function(msg)
     end
     if msg == "wishcheck" or msg == "wish" then
         LC.WishCheckTarget()
+        return
+    end
+    if msg == "tracker" or msg == "track" then
+        local r = LC.ToggleTracker and LC.ToggleTracker()
+        if r == "empty" then Print("nothing is tracked on the map. Right-click an item in the window: Track on map.")
+        elseif r == "nomap" then Print("tracking on the map needs pfQuest and the \"Show on map\" setting.") end
         return
     end
     if msg == "mobalerts" or msg == "mobalert" then
@@ -1754,6 +1877,21 @@ SlashCmdList.LOOTCODEX = function(msg)
     if msg == "tooltip" then
         LootCodexDB.tooltip = not LootCodexDB.tooltip
         Print("sources in item tooltips " .. (LootCodexDB.tooltip and "on." or "off."))
+        return
+    end
+    -- /codex alerts [sound|text|chat|off]: how wishlist alerts are shown; no word = say the current one
+    local style = msg:match("^alerts?%s*(%a*)$")
+    if style then
+        local names = {}
+        for _, s in ipairs(LC.ALERT_STYLES or {}) do names[s[1]] = s[2] end
+        if style ~= "" and names[style] then
+            LootCodexDB.wishAlertStyle = style
+        elseif style ~= "" then
+            Print("/codex alerts sound | text | chat | off")
+            return
+        end
+        local cur = LC.WishAlertStyle and LC.WishAlertStyle() or "sound"
+        Print("wishlist alerts: " .. (names[cur] or cur) .. ".   /codex alerts sound | text | chat | off")
         return
     end
     if msg == "itemtips" then

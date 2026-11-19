@@ -194,7 +194,7 @@ local function OnMessage(msg, channel, sender)
             if LC.LearnFromNetwork then LC.LearnFromNetwork(tonumber(item), sender) end
         else
             local key, r = LC.Decode(part)
-            if key and LC.AddRecord(key, r, sender) then added = added + 1 end
+            if key and LC.AddRecord(key, r, sender, channel ~= "WHISPER") then added = added + 1 end
         end
     end
     if catchup and sender == catchup.from then

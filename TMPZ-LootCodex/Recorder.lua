@@ -3,7 +3,9 @@
 -- with guild and group members running Loot Codex.
 --
 -- Everything is one record per fact, keyed so the same fact from two people is stored once:
---   "K"..corpseGUID          a looted corpse  {t="K", npc, name, zone, items="id,id,...", inst, cls}
+--   "K"..corpseGUID.."@"..lootTime   a looted corpse  {t="K", npc, name, zone, items="id,id,...", inst, cls}
+--                            (older versions keyed "K"..corpseGUID alone, which repeats every dungeon
+--                            run -- see SAME_CORPSE; those keys are still read)
 --                            inst = the instance it died in, cls = w world boss, s skull, r rare, e elite, n normal
 --   "E"..player..":"..npc..":"..time   n corpses of one mob that had no items (money only), counted
 --                            together and saved every few minutes  {t="E", npc, name, zone, n, inst, cls}.
@@ -26,7 +28,7 @@ local senders = {}
 local fishCounter = 0
 local EMPTY_FLUSH = 300         -- seconds between saving/sharing the counted empty corpses
 local emptyPending = {}         -- npc -> the "E" record being counted
-local emptySeen = {}            -- "K"..guid -> true: empty corpses already counted this session
+local emptySeen = {}            -- guid -> time(): empty corpses already counted (see SAME_CORPSE)
 
 local function ItemId(link)
     return link and tonumber(link:match("item:(%d+)"))
@@ -113,16 +115,56 @@ end
 -- the skill a trainer asks for to learn the recipe that makes item (nil = no trainer seen yet)
 function LC.TrainerReq(prof, item) return trainerReq[prof] and trainerReq[prof][item] end
 
+------------------------------------------------------------------------
+-- telling corpses apart. A creature's GUID is NOT unique over time on TrinityCore: every dungeon run
+-- is a new map that numbers its creatures from 1 again (Map::GetGuidSequenceGenerator is per map), so
+-- a boss gets the same GUID every run, and continents start over after a server restart. Keyed by
+-- GUID alone, every later run of a dungeon looked like the first one and was thrown away.
+-- So a corpse is its GUID plus when it was looted ("K"..guid.."@"..time), and the same GUID looted
+-- again within SAME_CORPSE seconds (a second group member opening it, re-opening a loot window, the
+-- same record arriving twice) is the same corpse. Runs of a dungeon are much further apart than that.
+------------------------------------------------------------------------
+local SAME_CORPSE = 1200
+local corpses = {}              -- guid -> { loot time, ... } for every kill record known
+
+-- the GUID and loot time a corpse key stands for; old keys ("K"..guid) carry no time, so the
+-- record's own time stands in
+local function CorpseOf(key, r)
+    local guid, kt = key:match("^K(0x%x+)@(%d+)$")
+    if guid then return guid, tonumber(kt) end
+    guid = key:match("^K(0x%x+)$")
+    if guid then return guid, r and r.rt or 0 end
+end
+
+local function NoteCorpse(key, r)
+    local guid, kt = CorpseOf(key, r)
+    if not guid then return end
+    corpses[guid] = corpses[guid] or {}
+    table.insert(corpses[guid], kt)
+end
+
+local function SameCorpse(guid, kt)
+    for _, t in ipairs(corpses[guid] or {}) do
+        if math.abs(t - kt) < SAME_CORPSE then return true end
+    end
+    return false
+end
+
 local function Reindex()
     wipe(mobs); wipe(itemMobs); wipe(itemVendors); wipe(itemQuests); wipe(senders); wipe(trainerReq)
+    wipe(corpses)
     for k in pairs(counts) do counts[k] = 0 end
     for key, r in pairs(shared) do
         if not log.rec[key] then
             r.src = r.src or "shared file"
             Index(r)
+            NoteCorpse(key, r)
         end
     end
-    for _, r in pairs(log.rec) do Index(r) end
+    for key, r in pairs(log.rec) do
+        Index(r)
+        NoteCorpse(key, r)
+    end
     LC.ForgetSources()
 end
 
@@ -160,14 +202,27 @@ local function NewFind(r)
 end
 
 -- Adds a record unless it is already known. src = sender's name, nil when recorded here.
-function LC.AddRecord(key, r, src)
+-- live = it arrived as a live share (guild/group broadcast), not a whispered catch-up.
+function LC.AddRecord(key, r, src, live)
     if r.zone and IGNORED_ZONES[r.zone] then return false end
+    -- Clients older than 1.5.7 key a kill by the corpse GUID alone ("K0x..."), and a dungeon boss has
+    -- the same GUID every run, so a live share of today's kill collided with an old run's record and
+    -- was dropped (Melisandre Scourgebane, 2026-11-15). A live share is a kill that just happened:
+    -- give it the arrival time like our own keys. Catch-ups (whispered) keep the old key, because those
+    -- resend whole logs and re-timing them would count the same old kill again on every sync.
+    if live and src and r.t == "K" then
+        local g = key:match("^K(0x%x+)$")
+        if g then key = "K" .. g .. "@" .. time() end
+    end
     if log.rec[key] or shared[key] then return false end
     if src and log.ignore[src] then return false end
+    local guid, kt = CorpseOf(key, { rt = time() })
+    if guid and SameCorpse(guid, kt) then return false end
     r.rt, r.src = time(), src
     log.rec[key] = r
     local find = src and LC.NoteShared and NewFind(r)     -- decided before Index adds it
     Index(r)
+    NoteCorpse(key, r)
     if find then LC.NoteShared(find, src) end
     return true
 end
@@ -277,18 +332,40 @@ local function CorpseUnit()
     end
 end
 
+-- The last dead creature under the mouse or targeted. The loot window opens a moment after the click
+-- (the server answers first), and by then the mouse has often moved off the corpse; with a player
+-- targeted (a healer on the tank) neither unit is the corpse any more and the loot went unrecorded
+-- (Melisandre Scourgebane's Scarlet Chestpiece, 2026-11-15). So the corpse is remembered here.
+local CORPSE_MEMORY = 5          -- seconds between seeing the corpse and its loot window opening
+local recentCorpse
+local function NoteCorpseUnit(unit)
+    if UnitExists(unit) and UnitIsDead(unit) and not UnitIsPlayer(unit) then
+        local g = UnitGUID(unit)
+        if NpcId(g) then
+            recentCorpse = { guid = g, name = UnitName(unit), cls = Classify(unit), at = GetTime() }
+        end
+    end
+end
+
 local function OnLoot()
-    local key, npc, name, cls
+    local key, npc, name, cls, guid
+    local now = time()
     if IsFishingLoot() then
         fishCounter = fishCounter + 1
         npc, name = "fishing:" .. Zone(), "Fishing"
-        key = "K" .. "F" .. LC.Clean(UnitName("player")) .. time() .. fishCounter
+        key = "K" .. "F" .. LC.Clean(UnitName("player")) .. now .. fishCounter
     else
         local unit = CorpseUnit()
-        local guid = unit and UnitGUID(unit)
+        if unit and NpcId(UnitGUID(unit)) then
+            guid, name, cls = UnitGUID(unit), UnitName(unit), Classify(unit)
+        elseif recentCorpse and GetTime() - recentCorpse.at <= CORPSE_MEMORY then
+            guid, name, cls = recentCorpse.guid, recentCorpse.name, recentCorpse.cls
+        end
         npc = NpcId(guid)
         if not npc then return end
-        key, name, cls = "K" .. guid, UnitName(unit), Classify(unit)
+        -- GUID + loot time: the GUID alone repeats every dungeon run (see SAME_CORPSE)
+        key = "K" .. guid .. "@" .. now
+        if SameCorpse(guid, now) then return end      -- this corpse is already recorded
     end
     local ids = {}
     for slot = 1, GetNumLootItems() do
@@ -300,8 +377,8 @@ local function OnLoot()
     if #ids == 0 and key:sub(2, 2) ~= "F" then
         -- money only: counted with the mob's other empty corpses (see FlushEmpty), unless this corpse was
         -- already recorded with items (it's been opened before and the items taken)
-        if log.rec[key] or shared[key] or emptySeen[key] then return end
-        emptySeen[key] = true
+        if emptySeen[guid] and now - emptySeen[guid] < SAME_CORPSE then return end
+        emptySeen[guid] = now
         local p = emptyPending[npc]
         if not p then
             p = { t = "E", npc = npc, name = name, zone = Zone(), n = 0, inst = cls and Instance(), cls = cls }
@@ -409,6 +486,11 @@ local BOSSES = {
     [50150] = { name = "Melisandre Scourgebane", inst = "Scarlet Monastery" },   -- 2026-11-08
     [45124] = { name = "Magmaw", inst = "Molten Core" },                         -- 2026-11-08
     [45134] = { name = "Moltara", inst = "Molten Core" },                        -- 2026-11-08, replaces Gehennas
+    -- real bosses Epoch's AtlasLoot has no table for (found auditing the guild's kills, 2026-11-11)
+    [9502]  = { name = "Phalanx", inst = "Blackrock Depths" },
+    [9499]  = { name = "Plugger Spazzring", inst = "Blackrock Depths" },
+    [9537]  = { name = "Hurley Blackbreath", inst = "Blackrock Depths" },
+    [49010] = { name = "Dootch", inst = "Stormwind Stockade" },                  -- Reborn
 }
 LC.BUILTIN_BOSSES = BOSSES
 
@@ -481,6 +563,7 @@ LC.NpcId = NpcId
 
 -- what this account (and anyone sharing) has looted from one creature: {name, zone, kills, items={id=count}}
 function LC.LearnedMob(npc) return mobs[npc] end
+function LC.LearnedMobs() return mobs end
 
 function LC.LearnedHas(id, kind)
     if kind == "L" then return itemMobs[id] ~= nil end
@@ -557,9 +640,13 @@ ev:SetScript("OnEvent", function(self, event, arg)
         self:RegisterEvent("QUEST_COMPLETE")
         self:RegisterEvent("TRAINER_SHOW")
         self:RegisterEvent("PLAYER_LOGOUT")          -- also fires on /reload
+        self:RegisterEvent("UPDATE_MOUSEOVER_UNIT")  -- remember corpses (see NoteCorpseUnit)
+        self:RegisterEvent("PLAYER_TARGET_CHANGED")
         if LC.SyncStart then LC.SyncStart(log) end
         return
     end
+    if event == "UPDATE_MOUSEOVER_UNIT" then NoteCorpseUnit("mouseover") return end
+    if event == "PLAYER_TARGET_CHANGED" then NoteCorpseUnit("target") return end
     if event == "PLAYER_LOGOUT" then
         FlushEmpty()     -- saved now, shared at the next login's catch-up
         return

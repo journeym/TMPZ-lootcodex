@@ -8,41 +8,92 @@
 LootCodex = LootCodex or {}
 local LC = LootCodex
 
-local LEFT, WIDTH = 16, 560
+local LEFT, WIDTH = 16, 530      -- WIDTH leaves room for the scroll bar
 local checkCount = 0
 
 local function Refresh() if LC.RefreshIfOpen then LC.RefreshIfOpen() end end
+
+-- Everything on a page goes through Place(), which remembers where it went. Text lines (Note, the
+-- intro) are given one line's room when built; when the page is shown they are re-fitted to the real
+-- width of the window and everything below a line that wraps moves down by the extra lines. Without
+-- this, long notes ran off the right edge or wrapped into the next option (UI scale and font decide
+-- how much fits).
+local function Place(p, region, x, dy)
+    region:SetPoint("TOPLEFT", x, p.y + (dy or 0))
+    p.items[#p.items + 1] = { region = region, x = x, y = p.y + (dy or 0) }
+    return p.items[#p.items]
+end
+
+-- a wrapping text line; room = the height it was given when built
+local function Flow(p, item, room)
+    item.flow, item.room = true, room
+end
+
+local function Reflow(p, scroll)
+    local w = scroll:GetWidth()
+    if not w or w <= 0 then return end
+    local shift = 0
+    for _, it in ipairs(p.items) do
+        it.region:ClearAllPoints()
+        it.region:SetPoint("TOPLEFT", it.x, it.y - shift)
+        if it.flow then
+            it.region:SetWidth(math.max(120, w - it.x - 14))
+            local h = it.region:GetStringHeight() or 0
+            if h > it.room + 2 then shift = shift + (h - it.room) end
+        end
+    end
+    p.shift = shift
+end
 local function ForgetUnits() if LC.ForgetUnitDrops then LC.ForgetUnitDrops() end end
 
--- a page; parent = nil for the main page
+-- a page; parent = nil for the main page. The page's controls live in a scroll frame inside the panel
+-- the Interface Options window shows, so a page with more options than fit gets a scroll bar instead
+-- of running out of the bottom of the window. Returns the scroll content (p.panel is the panel).
 local function Page(name, parent, intro)
-    local p = CreateFrame("Frame", "LootCodexSettings" .. (parent and name:gsub("%W", "") or ""), UIParent)
-    p.name = parent and name or "TMPZ-LootCodex"
-    p.parent = parent
-    p:Hide()
+    local panel = CreateFrame("Frame", "LootCodexSettings" .. (parent and name:gsub("%W", "") or ""), UIParent)
+    panel.name = parent and name or "TMPZ-LootCodex"
+    panel.parent = parent
+    panel:Hide()
+    local scroll = CreateFrame("ScrollFrame", panel:GetName() .. "Scroll", panel, "UIPanelScrollFrameTemplate")
+    scroll:SetPoint("TOPLEFT", 0, -4)
+    scroll:SetPoint("BOTTOMRIGHT", -28, 4)
+    local p = CreateFrame("Frame", nil, scroll)
+    p:SetSize(WIDTH + 60, 1)
+    scroll:SetScrollChild(p)
+    p.panel = panel
     p.y = -16
     p.onShow = {}
+    p.items = {}
     local title = p:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
-    title:SetPoint("TOPLEFT", LEFT, p.y)
+    Place(p, title, LEFT)
     title:SetText("|cff33ccffTMPZ-LootCodex|r" .. (parent and ("  -  " .. name) or ""))
     p.y = p.y - 24
     if intro then
         local t = p:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
-        t:SetPoint("TOPLEFT", LEFT, p.y)
         t:SetWidth(WIDTH)
         t:SetJustifyH("LEFT")
         t:SetText(intro)
+        Flow(p, Place(p, t, LEFT), 24)
         p.y = p.y - 30
     end
-    p:SetScript("OnShow", function() for _, f in ipairs(p.onShow) do f() end end)
-    InterfaceOptions_AddCategory(p)
+    panel:SetScript("OnShow", function()
+        for _, f in ipairs(p.onShow) do f() end
+        -- everything is laid out by now: text lines are fitted to the window's width (see Reflow), the
+        -- content is as tall as the lowest control, and the scroll bar appears only when it's taller
+        local w = scroll:GetWidth()
+        if w and w > 0 then p:SetWidth(w) end
+        Reflow(p, scroll)
+        p:SetHeight(-p.y + 20 + (p.shift or 0))
+        scroll:UpdateScrollChildRect()
+    end)
+    InterfaceOptions_AddCategory(panel)
     return p
 end
 
 local function Heading(p, text)
     p.y = p.y - 6
     local h = p:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-    h:SetPoint("TOPLEFT", LEFT, p.y)
+    Place(p, h, LEFT)
     h:SetText(text)
     p.y = p.y - 20
 end
@@ -50,10 +101,10 @@ end
 -- a grey explanation line under the control above it
 local function Note(p, text, indent)
     local t = p:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
-    t:SetPoint("TOPLEFT", LEFT + (indent or 0) + 26, p.y + 4)
     t:SetWidth(WIDTH - (indent or 0) - 26)
     t:SetJustifyH("LEFT")
     t:SetText(text)
+    Flow(p, Place(p, t, LEFT + (indent or 0) + 26, 4), 12)
     p.y = p.y - 16
     return t
 end
@@ -63,7 +114,7 @@ local function Check(p, label, note, key, opts)
     opts = opts or {}
     checkCount = checkCount + 1
     local cb = CreateFrame("CheckButton", "LootCodexSettingsCheck" .. checkCount, p, "InterfaceOptionsCheckButtonTemplate")
-    cb:SetPoint("TOPLEFT", LEFT + (opts.indent or 0), p.y)
+    Place(p, cb, LEFT + (opts.indent or 0))
     _G[cb:GetName() .. "Text"]:SetText(label)
     cb:SetScript("OnClick", function(self)
         local on = self:GetChecked() and true or false
@@ -85,7 +136,7 @@ end
 local function Button(p, text, width, onClick, indent)
     local b = CreateFrame("Button", nil, p, "UIPanelButtonTemplate")
     b:SetSize(width, 22)
-    b:SetPoint("TOPLEFT", LEFT + 4 + (indent or 0), p.y)
+    Place(p, b, LEFT + 4 + (indent or 0))
     b:SetText(text)
     b:SetScript("OnClick", onClick)
     p.y = p.y - 28
@@ -150,12 +201,12 @@ local shiftBox = Check(tips, "Only while holding the key below", "Keeps creature
 -- the key held for the longer lists (and, with the mouse wheel, to scroll them)
 Heading(tips, "Longer lists")
 local keyLabel = tips:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
-keyLabel:SetPoint("TOPLEFT", LEFT + 4, tips.y - 4)
+Place(tips, keyLabel, LEFT + 4, -4)
 keyLabel:SetText("Hold this key for the full list:")
 local keyRadios = {}
 for i, k in ipairs({ { "CTRL", "Ctrl" }, { "ALT", "Alt" } }) do
     local r = CreateFrame("CheckButton", "LootCodexSettingsKey" .. i, tips, "UIRadioButtonTemplate")
-    r:SetPoint("TOPLEFT", LEFT + 200 + (i - 1) * 70, tips.y - 2)
+    Place(tips, r, LEFT + 200 + (i - 1) * 70, -2)
     _G[r:GetName() .. "Text"]:SetText(k[2])
     r.value = k[1]
     keyRadios[i] = r
@@ -164,7 +215,7 @@ tips.y = tips.y - 24
 local keyNote = Note(tips, "", -26)
 
 local slider = CreateFrame("Slider", "LootCodexSettingsLines", tips, "OptionsSliderTemplate")
-slider:SetPoint("TOPLEFT", LEFT + 8, tips.y - 16)
+Place(tips, slider, LEFT + 8, -16)
 slider:SetWidth(240)
 slider:SetMinMaxValues(3, 15)
 slider:SetValueStep(1)
@@ -261,11 +312,11 @@ Check(feat, "Upgrade finder", "Arrows in the window and a line on item tooltips:
     "upgrades", { onChange = Refresh })
 
 local specLabel = feat:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
-specLabel:SetPoint("TOPLEFT", LEFT + 30, feat.y - 5)
+Place(feat, specLabel, LEFT + 30, -5)
 specLabel:SetText("Score items for:")
 local specButton = CreateFrame("Button", nil, feat, "UIPanelButtonTemplate")
 specButton:SetSize(220, 20)
-specButton:SetPoint("TOPLEFT", LEFT + 130, feat.y)
+Place(feat, specButton, LEFT + 130)
 feat.y = feat.y - 30
 local function SpecText()
     local v = LootCodexDB.upgradeSpec or "auto"
@@ -285,15 +336,36 @@ feat.onShow[#feat.onShow + 1] = SpecText
 
 Check(feat, "Mark the best quest reward",
     "An arrow on the best upgrade among a quest's choices, or a coin on the one that sells for most.", "questBest")
-Check(feat, "Wishlist alerts", "Raid-warning text and a sound when a wishlisted item is in a loot window or up for roll.",
-    "wishAlerts")
-local mobBox = Check(feat, "Wishlist creature alerts",
-    "Targeting or fighting a mob that drops a wishlisted item says so on screen and stars its portrait."
+Check(feat, "Wishlist alerts", "When a wishlisted item is in a loot window or up for roll.", "wishAlerts")
+Check(feat, "Wishlist creature alerts",
+    "Targeting or fighting a mob that drops a wishlisted item says so, and stars its portrait."
     .. " Once per kind of mob every 5 minutes.  /codex wishcheck asks about your target.",
     "wishMobAlerts", { onChange = function() if LC.ForgetMobAlerts then LC.ForgetMobAlerts() end end })
-local mobSound = Check(feat, "Play a sound with them", nil, "wishMobSound", { indent = 24 })
-mobBox:HookScript("OnClick", function(self) Enable(mobSound, self:GetChecked() and true or false) end)
-feat.onShow[#feat.onShow + 1] = function() Enable(mobSound, LootCodexDB.wishMobAlerts and true or false) end
+
+-- how both kinds of wishlist alert are shown (Wishlist.lua: LC.ALERT_STYLES)
+local styleLabel = feat:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+Place(feat, styleLabel, LEFT + 30, -2)
+styleLabel:SetText("Show wishlist alerts as:")
+feat.y = feat.y - 16
+local styleRadios = {}
+local function SyncStyle()
+    local cur = LC.WishAlertStyle and LC.WishAlertStyle() or "sound"
+    for _, r in ipairs(styleRadios) do r:SetChecked(r.value == cur) end
+end
+for i, s in ipairs(LC.ALERT_STYLES or {}) do
+    local r = CreateFrame("CheckButton", "LootCodexSettingsAlertStyle" .. i, feat, "UIRadioButtonTemplate")
+    Place(feat, r, LEFT + 34 + ((i - 1) % 2) * 190, -math.floor((i - 1) / 2) * 20)
+    _G[r:GetName() .. "Text"]:SetText(s[2])
+    r.value = s[1]
+    r:SetScript("OnClick", function(self)
+        LootCodexDB.wishAlertStyle = self.value
+        SyncStyle()
+    end)
+    styleRadios[i] = r
+end
+feat.y = feat.y - 44
+Note(feat, "On screen = the big raid-warning text. Every choice except Off also puts a line in chat.  /codex alerts", 4)
+feat.onShow[#feat.onShow + 1] = SyncStyle
 Check(feat, "Remember recently viewed items", "The Recent tab: items you click in the window or open from chat links.",
     "trackRecent")
 Check(feat, "Open on the dungeon you're in",
@@ -301,6 +373,6 @@ Check(feat, "Open on the dungeon you're in",
 
 function LC.OpenSettings()
     -- the first call in 3.3.5 can land on the wrong page; the second one sticks
-    InterfaceOptionsFrame_OpenToCategory(main)
-    InterfaceOptionsFrame_OpenToCategory(main)
+    InterfaceOptionsFrame_OpenToCategory(main.panel)
+    InterfaceOptionsFrame_OpenToCategory(main.panel)
 end

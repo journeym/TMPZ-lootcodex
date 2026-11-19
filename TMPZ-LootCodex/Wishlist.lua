@@ -1,6 +1,6 @@
 -- Wishlist (per character), alerts when a wishlisted item drops, recently viewed items, and
 -- "Show on map" through pfQuest, and alerts for creatures that drop a wishlisted item.
--- Toggles: LootCodexDB.wishAlerts, .wishMobAlerts, .wishMobSound, .trackRecent, .mapPins.
+-- Toggles: LootCodexDB.wishAlerts, .wishMobAlerts, .wishAlertStyle, .trackRecent, .mapPins.
 
 LootCodex = LootCodex or {}
 local LC = LootCodex
@@ -50,12 +50,32 @@ function LC.ToggleWish(id)
     if LC.RefreshIfOpen then LC.RefreshIfOpen() end
 end
 
+-- How wishlist alerts (item drops and creature alerts alike) are shown: LootCodexDB.wishAlertStyle
+--   "sound" = raid-warning text on screen + the raid-warning sound + a chat line (the default)
+--   "text"  = on-screen text and a chat line, no sound
+--   "chat"  = a chat line only
+--   "off"   = nothing at all
+LC.ALERT_STYLES = { { "sound", "On screen + sound" }, { "text", "On screen, no sound" },
+    { "chat", "Chat line only" }, { "off", "Off (silent)" } }
+local function AlertStyle()
+    local s = LootCodexDB and LootCodexDB.wishAlertStyle
+    if s then return s end
+    -- before the style choice there was only "Play a sound" for creature alerts: keep a "no" quiet
+    return (LootCodexDB and LootCodexDB.wishMobSound == false) and "text" or "sound"
+end
+LC.WishAlertStyle = AlertStyle
+
+local function Announce(msg)
+    local style = AlertStyle()
+    if style == "off" then return end
+    if style ~= "chat" then RaidNotice_AddMessage(RaidWarningFrame, msg, ChatTypeInfo["RAID_WARNING"]) end
+    if style == "sound" then PlaySound("RaidWarning") end
+    Print(msg)
+end
+
 local function Alert(id, where)
     if not (LootCodexDB and LootCodexDB.wishAlerts) then return end
-    local msg = STAR .. " Wishlist item " .. where .. ": " .. ItemLinkOrName(id)
-    RaidNotice_AddMessage(RaidWarningFrame, msg, ChatTypeInfo["RAID_WARNING"])
-    PlaySound("RaidWarning")
-    Print(msg)
+    Announce(STAR .. " Wishlist item " .. where .. ": " .. ItemLinkOrName(id))
 end
 
 local ev = CreateFrame("Frame")
@@ -240,27 +260,94 @@ local function ShowBest(places, what)
 end
 
 
-function LC.ShowItemOnMap(id, keep)
-    if not LC.CanShowOnMap() then return end
-    if not keep then pfMap:DeleteNode(PIN_TAG) end
-    pfDatabase:SearchItemID(id, { addon = PIN_TAG })      -- pins for every source
-    ShowBest(ItemPlaces(id), ItemLinkOrName(id))
+------------------------------------------------------------------------
+-- what is being tracked on the map, per character, in the order it was added: { k = "i" or "m", id,
+-- name }. Tracker.lua shows it as a list; clicking an entry opens the map where it's found.
+------------------------------------------------------------------------
+local function Tracked()
+    local t = Store("mapTrack")
+    t.list = t.list or {}
+    return t.list
+end
+function LC.Tracked() return LootCodexDB and Tracked() or {} end
+
+local function TrackChanged() if LC.TrackerChanged then LC.TrackerChanged() end end
+
+local function Track(k, id, name)
+    local list = Tracked()
+    for _, e in ipairs(list) do if e.k == k and e.id == id then return end end
+    list[#list + 1] = { k = k, id = id, name = name }
 end
 
-function LC.ShowMobOnMap(npc, name)
-    if not LC.CanShowOnMap() then return end
-    pfMap:DeleteNode(PIN_TAG)
-    pfDatabase:SearchMobID(npc, { addon = PIN_TAG })
+local function MobPlaces(npc, name)
     local places = {}
     AddSpawns(places, pfDB.units.data[npc] and pfDB.units.data[npc].coords, 100, name or UnitName_(npc))
     table.sort(places, function(a, b) return a.spawns > b.spawns end)
-    ShowBest(places, name or "that creature")
+    return places
+end
+
+-- the places an entry is found, best first (see ItemPlaces), and the first one the world map can open
+function LC.TrackedPlaces(e)
+    if not LC.CanShowOnMap() then return {} end
+    return e.k == "m" and MobPlaces(e.id, e.name) or ItemPlaces(e.id)
+end
+function LC.TrackedBestZone(e)
+    for _, p in ipairs(LC.TrackedPlaces(e)) do
+        if OnWorldMap(p.zone) then return pfDB.zones.loc[p.zone], p end
+    end
+end
+
+-- opens the world map where a tracked entry is best found
+function LC.GoToTracked(e)
+    if not LC.CanShowOnMap() then return end
+    local what = e.k == "m" and (e.name or "that creature") or ItemLinkOrName(e.id)
+    ShowBest(LC.TrackedPlaces(e), what)
+end
+
+-- puts every tracked entry's pins back (after removing one, and after a /reload: pfQuest keeps none)
+local function Repin()
+    pfMap:DeleteNode(PIN_TAG)
+    for _, e in ipairs(Tracked()) do
+        if e.k == "m" then pfDatabase:SearchMobID(e.id, { addon = PIN_TAG })
+        else pfDatabase:SearchItemID(e.id, { addon = PIN_TAG }) end
+    end
+    pfMap:UpdateNodes()
+end
+
+function LC.UntrackOnMap(index)
+    local list = Tracked()
+    if not list[index] then return end
+    table.remove(list, index)
+    if LC.CanShowOnMap() then Repin() end
+    TrackChanged()
+end
+
+-- keep = add to what is already tracked (the window's list); without it, this replaces it
+function LC.ShowItemOnMap(id, keep)
+    if not LC.CanShowOnMap() then return end
+    if not keep then pfMap:DeleteNode(PIN_TAG); wipe(Tracked()) end
+    pfDatabase:SearchItemID(id, { addon = PIN_TAG })      -- pins for every source
+    Track("i", id)
+    TrackChanged()
+    ShowBest(ItemPlaces(id), ItemLinkOrName(id))
+end
+
+function LC.ShowMobOnMap(npc, name, keep)
+    if not LC.CanShowOnMap() then return end
+    if not keep then pfMap:DeleteNode(PIN_TAG); wipe(Tracked()) end
+    pfDatabase:SearchMobID(npc, { addon = PIN_TAG })
+    Track("m", npc, name or UnitName_(npc))
+    TrackChanged()
+    ShowBest(MobPlaces(npc, name), name or "that creature")
 end
 
 -- pins every wishlist item, then opens the zone where the most of them are best found
 function LC.ShowWishlistOnMap()
     if not LC.CanShowOnMap() then return end
     pfMap:DeleteNode(PIN_TAG)
+    wipe(Tracked())
+    for id in pairs(Store("wish")) do Track("i", id) end
+    TrackChanged()
     local votes, first = {}, {}
     for id in pairs(Store("wish")) do
         pfDatabase:SearchItemID(id, { addon = PIN_TAG })
@@ -284,11 +371,22 @@ function LC.ShowWishlistOnMap()
 end
 
 function LC.ClearMapPins()
+    if LootCodexDB then wipe(Tracked()) end
     if pfMap then
         pfMap:DeleteNode(PIN_TAG)
         pfMap:UpdateNodes()
     end
+    TrackChanged()
 end
+
+-- after a /reload or login pfQuest has none of our pins: put the tracked ones back
+local repin = CreateFrame("Frame")
+repin:RegisterEvent("PLAYER_ENTERING_WORLD")
+repin:SetScript("OnEvent", function(self)
+    self:UnregisterEvent("PLAYER_ENTERING_WORLD")
+    if LC.CanShowOnMap() and #Tracked() > 0 then Repin() end
+    TrackChanged()
+end)
 
 ------------------------------------------------------------------------
 -- creature alerts: targeting or fighting a mob that drops something on the wishlist puts a
@@ -335,9 +433,11 @@ local function CheckMob(guid, name, force)
     if not force and announced[npc] and now - announced[npc] < MOB_COOLDOWN then return list end
     announced[npc] = now
     local msg = STAR .. " " .. (name or "This creature") .. " drops " .. DropsText(list)
-    RaidNotice_AddMessage(RaidWarningFrame, msg, ChatTypeInfo["RAID_WARNING"])
-    if LootCodexDB.wishMobSound then PlaySound("RaidWarning") end
-    Print(msg)
+    if force then
+        Print(msg)          -- /codex wishcheck: you asked, so always answer (in chat, quietly)
+    else
+        Announce(msg)
+    end
     return list
 end
 
